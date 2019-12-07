@@ -1,9 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 
+import Control.Monad.Extra (whileM)
+import Data.IORef
 import Data.Array.IO
 import Data.Array.MArray
-import Control.Monad (forM_, when, foldM, forM)
+import Control.Monad (forM_, when, foldM, forM, void)
+import Control.Concurrent.STM.TChan (TChan, newTChanIO, readTChan, writeTChan, unGetTChan, tryReadTChan, dupTChan)
+import Control.Concurrent.STM (atomically)
+import Control.Concurrent (forkIO)
 
 program :: [Int]
 program = [1,12,2,3,1,1,2,3,1,3,4, 3, 1, 5,0,3,2,1,6,19,1,9,19,23,2,23,10,27,1,27,5,31,1,31,6,35,1,6,35,39,2,39,13,43,1,9,43,47,2,9,47,51,1,51,6,55,2,55,10,59,1,59,5,63,2,10,63,67,2,9,67,71,1,71,5,75,2,10,75,79,1,79,6,83,2,10,83,87,1,5,87,91,2,9,91,95,1,95,5,99,1,99,2,103,1,103,13,0,99,2,14,0,0]
@@ -17,12 +22,12 @@ small = [1,9,10,3,
 
 d5opcodes :: [Int]
 d5opcodes = [
-  4, 50,  7, 10, 11, 51,  4, 51, 99,  0,
+  4, 50,  7, 10, 09, 51,  4, 51, 99,  0,
   5,  5,  0,  0,  0,  0,  0,  0,  0,  0,
   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+ 77,  0,  0,  0,  0,  0,  0,  0,  0,  0
  ]
 
 
@@ -72,48 +77,83 @@ cmpOp prog ip cmp = do
   value <- cmp <$> readArg prog ip 1 <*> readArg prog ip 2
   writeArg prog ip 3 (boolToValue value)
 
-run :: Program -> [Int] -> IO [Int]
-run prog input = reverse <$> go 0 input []
+inputOp :: Program -> Int -> TChan Int -> IO ()
+inputOp prog ip chan = do
+  atomically (readTChan chan) >>= writeArg prog ip 1
+
+outputOp :: Program -> Int -> TChan Int -> IO ()
+outputOp prog ip chan = do
+  val <- readArg prog ip 1
+  atomically $ writeTChan chan val
+
+run :: Program -> TChan Int -> TChan Int -> TChan () -> IO ()
+run prog input output halt = void $ forkIO $ go 0
   where
-    go :: Int -> [Int] -> [Int] -> IO [Int]
-    go ip input output = do
+    go :: Int -> IO ()
+    go ip = do
       (`mod` 100) <$> readArray prog ip >>= \case
-        1 -> binaryOp prog ip (+) >> go (ip + 4) input output
-        2 -> binaryOp prog ip (*) >> go (ip + 4) input output
-        3 -> writeArg prog ip 1 (head input) >> go (ip + 2) (tail input) output
-        4 -> do
-          val <- readArg prog ip 1
-          go (ip + 2) input (val:output)
-        5 -> do
-          ip' <- jumpIfOp prog ip (/= 0)
-          go ip' input output
-        6 -> do
-          ip' <- jumpIfOp prog ip (== 0)
-          go ip' input output
-        7 -> cmpOp prog ip (<) >> go (ip + 4) input output
-        8 -> cmpOp prog ip (==) >> go (ip + 4) input output
-        99 -> pure output
+        1 -> binaryOp prog ip (+) >> go (ip + 4)
+        2 -> binaryOp prog ip (*) >> go (ip + 4)
+        3 -> inputOp prog ip input >> go (ip + 2)
+        4 -> outputOp prog ip output >> go (ip + 2)
+        5 -> jumpIfOp prog ip (/= 0) >>= go
+        6 -> jumpIfOp prog ip (== 0) >>= go
+        7 -> cmpOp prog ip (<) >> go (ip + 4)
+        8 -> cmpOp prog ip (==) >> go (ip + 4)
+        99 -> void $ atomically $ writeTChan halt ()
         bad -> error $ "bad op " ++ show bad
+
+d7_2_small_1 :: [Int]
+d7_2_small_1 = [3,26,1001,26,-4,26,3,27,1002,27,2,27,1,27,26, 27,4,27,1001,28,-1,28,1005,28,6,99,0,0,5]
+
+d7_2_small_2 :: [Int]
+d7_2_small_2 = [3,52,1001,52,-5,52,3,53,1,52,56,54,1007,54,5,55,1005,55,26,1001,54, -5,54,1105,1,12,1,53,54,53,1008,54,0,55,1001,55,1,55,2,53,55,53,4, 53,1001,56,-1,56,1005,56,6,99,0,0,0,0,10]
 
 main :: IO ()
 main = do
-  -- p <- makeRunnable d5
-  -- run p []
-  -- forM_ [0..99] $ \v1 ->
-  --   forM_ [0..99] $ \v2 -> do
-  --       p <- makeRunnable program
-  --       writeArray p 1 v1
-  --       writeArray p 2 v2
-  --       res <- run p
-  --       when (res == 19690720) $ do
-  --         putStrLn $ show $ 100 * v1 + v2
-  -- p <- makeRunnable d5opcodes
-  -- run p
-  -- runAmplifier 4 0 >>= putStrLn . show
-  signals <- forM (permutations [0..4]) $ \phases -> do
-    foldM (flip runAmplifier) 0 phases
+  runFeedbackLoop d7_2_small_1 [9,8,7,6,5] >>= putStrLn . show
+  runFeedbackLoop d7_2_small_2 [9,7,8,5,6] >>= putStrLn . show
+  signals <- forM (permutations [5..9]) $ \phases -> do
+    runFeedbackLoop d7 phases
   putStrLn $ show $ maximum signals
   pure ()
+
+runFeedbackLoop :: [Int] -> [Int] -> IO Int
+runFeedbackLoop prog phases = do
+  input <- newTChanIO
+  loopOutput <- atomically $ dupTChan input
+
+  curInp <- newIORef input
+
+  forM (init phases) $ \phase -> do
+    input <- readIORef curInp
+    atomically $ unGetTChan input phase
+    output <- newTChanIO
+    halt <- newTChanIO
+    p <- makeRunnable prog
+    run p input output halt
+    writeIORef curInp output
+
+  lastP <- makeRunnable prog
+
+  preLastOut <- readIORef curInp
+  atomically $ unGetTChan preLastOut (last phases)
+
+  halt <- newTChanIO
+  run lastP preLastOut input halt
+
+  atomically $ writeTChan input 0
+  void $ atomically $ readTChan halt
+
+  lastOut <- newIORef 0
+  whileM $ do
+    atomically (tryReadTChan loopOutput) >>= \case
+      Nothing -> pure False
+      Just val -> do
+        writeIORef lastOut val
+        pure True
+
+  readIORef lastOut
 
 permutations :: [a] -> [[a]]
 permutations [] = []
@@ -128,13 +168,6 @@ subproblems = go []
   where
     go skipped [] = []
     go skipped (x:xs) = (x, reverse skipped ++ xs) : go (x:skipped) xs
-
-runAmplifier :: Int -> Int -> IO Int
-runAmplifier phase input = do
-  -- putStrLn $ show $ subproblems [1,2,3]
-  -- putStrLn $ show $ permutations [0,1,2,3,4]
-  p <- makeRunnable d7
-  head <$> run p [phase, input]
 
 test :: IO ()
 test = do
