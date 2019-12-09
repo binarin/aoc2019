@@ -14,7 +14,11 @@ import Control.Lens.TH
 import Control.Monad.Extra (whileM)
 import Data.IORef
 import Data.Array.IO
+import Data.Array.ST (STArray, runSTArray)
 import Data.Array.MArray
+import Data.Array (Array, (!))
+
+import Control.Exception (throwIO, Exception)
 import Control.Monad (forM_, when, foldM, forM, void, zipWithM)
 import Control.Concurrent.STM.TChan (TChan, newTChanIO, readTChan, writeTChan, unGetTChan, tryReadTChan, dupTChan)
 import Control.Concurrent.STM (atomically)
@@ -25,26 +29,31 @@ type MachineWord = Integer
 type MachinePointer = Int
 type ArgumentNo = Int
 
--- type OpcodeTable =
-
+type OpcodeTable = Array Int (App ())
 
 data Program = Program { _programMemoryL :: IOArray MachinePointer MachineWord
                        , _programIpL :: MachinePointer
                        , _programRelativeBaseL :: MachinePointer
-                       , _programOnHaltL :: IO ()
-                       , _programInputOpL :: IO MachineWord
+                       , _programHaltedL :: Bool
+                       , _programOpcodesL :: OpcodeTable
                        }
-makeFields ''Program
-
 newtype App a = App { runApp :: StateT Program IO a } deriving (Functor, Applicative, Monad, MonadIO, MonadState Program)
 
-makeRunnable :: [MachineWord] -> IO () -> IO MachineWord -> IO Program
-makeRunnable rawProgram onHalt inputOp = do
+type HaltAction = IO ()
+type InputAction = IO MachineWord
+type OutputAction = MachineWord -> IO ()
+
+makeFields ''Program
+
+
+makeRunnable :: [MachineWord] -> OpcodeTable -> IO Program
+makeRunnable rawProgram opcodes = do
   let initialLength = fromIntegral (length rawProgram) - 1
   memory <- newListArray (0, initialLength) rawProgram
   let ip = 0
       relativeBase = 0
-  pure $ Program memory ip relativeBase onHalt inputOp
+      halted = False
+  pure $ Program memory ip relativeBase halted opcodes
 
 ensureMemoryBigEnough :: MachinePointer -> App ()
 ensureMemoryBigEnough ptr = do
@@ -110,44 +119,88 @@ binaryOp f = do
   f <$> readArg 1 <*> readArg 2 >>= writeArg 3
   ipL += 4
 
-inputOp :: App ()
-inputOp = do
-  val <- use inputOpL >>= liftIO
-  writeArg 1 val
+inputOp :: InputAction -> App ()
+inputOp action = do
+  value <- liftIO $ action
+  writeArg 1 value
   ipL += 2
+
+relativeBaseAddOp :: App ()
+relativeBaseAddOp = do
+  delta <- readArg 1
+  relativeBaseL += fromIntegral delta
+  ipL += 2
+
+pureOpcodes :: [(Int, App ())]
+pureOpcodes = [(1, binaryOp (+))
+              ,(2, binaryOp (*))
+              ,(5, jumpIfOp (/= 0))
+              ,(6, jumpIfOp (== 0))
+              ,(7, cmpOp (<))
+              ,(8, cmpOp (==))
+              ,(9, relativeBaseAddOp)
+              ]
+
+haltOp :: HaltAction -> App ()
+haltOp halt = do
+  haltedL .= True
+  liftIO $ halt
+
+outputOp :: OutputAction -> App ()
+outputOp action = do
+  readArg 1 >>= liftIO . action
+  ipL += 2
+
+jumpIfOp :: (MachineWord -> Bool) -> App ()
+jumpIfOp shouldJump = do
+  shouldJump <$> readArg 1 >>= \case
+    False -> ipL += 3
+    True -> do
+      ip' <- readArg 2
+      ipL .= fromIntegral ip'
+
+boolToValue :: Bool -> MachineWord
+boolToValue True = 1
+boolToValue False = 0
+
+cmpOp :: (MachineWord -> MachineWord -> Bool) -> App ()
+cmpOp cmp = do
+  value <- cmp <$> readArg 1 <*> readArg 2
+  writeArg 3 (boolToValue value)
+  ipL += 4
+
+mkIoOpcodes :: HaltAction -> InputAction -> OutputAction -> [(Int, App())]
+mkIoOpcodes halt input output = [(99, haltOp halt)
+                                ,(3, inputOp input)
+                                ,(4, outputOp output)
+                                ]
+
+data IntcodeException = OpcodeMissing Int deriving (Show)
+instance Exception IntcodeException
+
+mkOpcodesTable :: [(Int, App ())] -> OpcodeTable
+mkOpcodesTable opcodes = runSTArray $ do
+  let maxCode = maximum (fst <$> opcodes)
+      minCode = minimum (fst <$> opcodes)
+  table <- newArray (minCode, maxCode) (liftIO $ throwIO $ OpcodeMissing 0)
+  forM_ [minCode..maxCode] $ \opcode -> writeArray table opcode (liftIO $ throwIO $ OpcodeMissing opcode)
+  forM_ opcodes $ \(opcode, action) -> writeArray table opcode action
+  pure table
 
 run :: App ()
 run = go
   where
     go :: App ()
-    go = (`mod` 100) <$> readWordRelativeIp 0 >>= \case
-      1 -> binaryOp (+) >> go
-      2 -> binaryOp (*) >> go
-      3 -> inputOp >> go
-      99 -> use onHaltL >>= liftIO
-
--- run :: Program -> TChan Int -> TChan Int -> TChan () -> IO ()
--- run prog input output halt = void $ forkIO $ go 0
---   where
---     go :: Int -> IO ()
---     go ip = do
---       (`mod` 100) <$> readArray prog ip >>= \case
---         1 -> binaryOp prog ip (+) >> go (ip + 4)
---         2 -> binaryOp prog ip (*) >> go (ip + 4)
---         3 -> inputOp prog ip input >> go (ip + 2)
---         4 -> outputOp prog ip output >> go (ip + 2)
---         5 -> jumpIfOp prog ip (/= 0) >>= go
---         6 -> jumpIfOp prog ip (== 0) >>= go
---         7 -> cmpOp prog ip (<) >> go (ip + 4)
---         8 -> cmpOp prog ip (==) >> go (ip + 4)
---         99 -> void $ atomically $ writeTChan halt ()
---         bad -> error $ "bad op " ++ show bad
-
-
+    go = do
+      opcode <- (`mod` 100) <$> readWordRelativeIp 0
+      action <- uses opcodesL (! fromIntegral opcode)
+      action
+      use haltedL >>= \case
+        True -> pure ()
+        False -> go
 
 dump :: Show a => a -> App ()
 dump a = liftIO $ putStrLn $ show a
-
 
 mkListInput :: [MachineWord] -> IO (IO MachineWord)
 mkListInput elements = do
@@ -170,7 +223,7 @@ mkListOutput = do
 
 main :: IO ()
 main = do
-  let scratch = [ 3, 50, 99, 52, 99, 51,  4, 51, 99,  0,
+  let scratch = [ 4, 50,  3, 50,  4, 50, 99, 51, 99,  0,
                   5,  5,  0,  0,  0,  0,  0,  0,  0,  0,
                   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
                   0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -178,17 +231,25 @@ main = do
                  42, 13,  0,  0,  0,  0,  0,  0,  0,  0
                 ]
 
-  input <- mkListInput [7]
-  (outputRef, output) <- mkListOutput
-  p <- makeRunnable scratch (putStrLn "halted") input output
+  let selfCopy = [109,1,204,-1,1001,100,1,100,1008,100,16,101,1006,101,0,99]
+
+  inputAction <- mkListInput [2]
+  (outputRef, outputAction) <- mkListOutput
+  let haltAction = putStrLn "halted"
+      ioOpcodes = mkIoOpcodes haltAction inputAction outputAction
+      opcodes = pureOpcodes ++ ioOpcodes
+
+
+  p <- makeRunnable d8 (mkOpcodesTable opcodes)
   let comp :: App () = do
         run
         readWord 50 >>= dump
   execStateT (runApp comp) p
+  readIORef outputRef >>= putStrLn . show . reverse
   pure ()
 
-
-
+d8 :: [MachineWord]
+d8 = [1102,34463338,34463338,63,1007,63,34463338,63,1005,63,53,1101,0,3,1000,109,988,209,12,9,1000,209,6,209,3,203,0,1008,1000,1,63,1005,63,65,1008,1000,2,63,1005,63,904,1008,1000,0,63,1005,63,58,4,25,104,0,99,4,0,104,0,99,4,17,104,0,99,0,0,1102,1,432,1027,1101,439,0,1026,1101,0,36,1010,1101,0,34,1018,1102,278,1,1029,1101,0,24,1002,1102,1,20,1016,1102,1,31,1011,1102,319,1,1024,1102,21,1,1012,1102,1,763,1022,1102,1,25,1007,1101,0,287,1028,1102,32,1,1008,1101,0,22,1013,1102,38,1,1001,1101,0,314,1025,1102,35,1,1009,1102,1,23,1015,1102,39,1,1019,1102,27,1,1000,1102,1,37,1003,1102,1,28,1017,1101,0,0,1020,1101,0,29,1004,1102,1,30,1006,1102,1,756,1023,1102,1,33,1005,1101,0,1,1021,1102,26,1,1014,109,13,2108,28,-7,63,1005,63,201,1001,64,1,64,1105,1,203,4,187,1002,64,2,64,109,8,21107,40,41,-3,1005,1018,225,4,209,1001,64,1,64,1105,1,225,1002,64,2,64,109,-3,1206,2,239,4,231,1105,1,243,1001,64,1,64,1002,64,2,64,109,-21,1201,6,0,63,1008,63,35,63,1005,63,267,1001,64,1,64,1105,1,269,4,249,1002,64,2,64,109,35,2106,0,-4,4,275,1001,64,1,64,1105,1,287,1002,64,2,64,109,-11,1205,-1,303,1001,64,1,64,1105,1,305,4,293,1002,64,2,64,109,8,2105,1,-5,4,311,1106,0,323,1001,64,1,64,1002,64,2,64,109,-7,21108,41,38,-6,1005,1016,339,1106,0,345,4,329,1001,64,1,64,1002,64,2,64,109,2,21102,42,1,-8,1008,1016,45,63,1005,63,369,1001,64,1,64,1105,1,371,4,351,1002,64,2,64,109,-14,21101,43,0,1,1008,1011,43,63,1005,63,397,4,377,1001,64,1,64,1106,0,397,1002,64,2,64,109,-8,21101,44,0,8,1008,1010,47,63,1005,63,417,1105,1,423,4,403,1001,64,1,64,1002,64,2,64,109,25,2106,0,0,1001,64,1,64,1105,1,441,4,429,1002,64,2,64,109,-20,2107,37,-6,63,1005,63,463,4,447,1001,64,1,64,1106,0,463,1002,64,2,64,109,8,2108,25,-8,63,1005,63,485,4,469,1001,64,1,64,1106,0,485,1002,64,2,64,109,-1,21107,45,44,-1,1005,1013,505,1001,64,1,64,1106,0,507,4,491,1002,64,2,64,109,-11,1207,-1,25,63,1005,63,529,4,513,1001,64,1,64,1106,0,529,1002,64,2,64,109,23,1206,-5,545,1001,64,1,64,1106,0,547,4,535,1002,64,2,64,109,-31,2102,1,5,63,1008,63,27,63,1005,63,569,4,553,1106,0,573,1001,64,1,64,1002,64,2,64,109,27,21102,46,1,-9,1008,1013,46,63,1005,63,595,4,579,1105,1,599,1001,64,1,64,1002,64,2,64,109,-26,2101,0,6,63,1008,63,24,63,1005,63,625,4,605,1001,64,1,64,1106,0,625,1002,64,2,64,109,5,1208,0,37,63,1005,63,645,1001,64,1,64,1105,1,647,4,631,1002,64,2,64,109,7,2102,1,-3,63,1008,63,31,63,1005,63,671,1001,64,1,64,1105,1,673,4,653,1002,64,2,64,109,2,1202,-5,1,63,1008,63,33,63,1005,63,699,4,679,1001,64,1,64,1105,1,699,1002,64,2,64,109,-4,2101,0,-3,63,1008,63,35,63,1005,63,719,1105,1,725,4,705,1001,64,1,64,1002,64,2,64,109,-5,1207,4,32,63,1005,63,741,1106,0,747,4,731,1001,64,1,64,1002,64,2,64,109,29,2105,1,-7,1001,64,1,64,1106,0,765,4,753,1002,64,2,64,109,-26,2107,36,5,63,1005,63,781,1105,1,787,4,771,1001,64,1,64,1002,64,2,64,109,10,1201,-6,0,63,1008,63,32,63,1005,63,809,4,793,1106,0,813,1001,64,1,64,1002,64,2,64,109,3,21108,47,47,-5,1005,1012,835,4,819,1001,64,1,64,1106,0,835,1002,64,2,64,109,-24,1202,9,1,63,1008,63,25,63,1005,63,859,1001,64,1,64,1106,0,861,4,841,1002,64,2,64,109,19,1205,9,875,4,867,1106,0,879,1001,64,1,64,1002,64,2,64,109,-3,1208,-1,32,63,1005,63,897,4,885,1106,0,901,1001,64,1,64,4,64,99,21102,27,1,1,21101,915,0,0,1105,1,922,21201,1,60043,1,204,1,99,109,3,1207,-2,3,63,1005,63,964,21201,-2,-1,1,21102,1,942,0,1106,0,922,21202,1,1,-1,21201,-2,-3,1,21101,957,0,0,1106,0,922,22201,1,-1,-2,1105,1,968,22102,1,-2,-2,109,-3,2105,1,0]
 
 -- program :: [Integer]
 -- program = [1,12,2,3,1,1,2,3,1,3,4, 3, 1, 5,0,3,2,1,6,19,1,9,19,23,2,23,10,27,1,27,5,31,1,31,6,35,1,6,35,39,2,39,13,43,1,9,43,47,2,9,47,51,1,51,6,55,2,55,10,59,1,59,5,63,2,10,63,67,2,9,67,71,1,71,5,75,2,10,75,79,1,79,6,83,2,10,83,87,1,5,87,91,2,9,91,95,1,95,5,99,1,99,2,103,1,103,13,0,99,2,14,0,0]
@@ -219,34 +280,6 @@ main = do
 -- d7 :: [Int]
 -- d7 = [3,8,1001,8,10,8,105,1,0,0,21,42,55,64,77,94,175,256,337,418,99999,3,9,102,4,9,9,1001,9,5,9,102,2,9,9,101,3,9,9,4,9,99,3,9,102,2,9,9,101,5,9,9,4,9,99,3,9,1002,9,4,9,4,9,99,3,9,102,4,9,9,101,5,9,9,4,9,99,3,9,102,5,9,9,1001,9,3,9,1002,9,5,9,4,9,99,3,9,1002,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,1001,9,1,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,101,2,9,9,4,9,3,9,1001,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,99,3,9,1002,9,2,9,4,9,3,9,1001,9,2,9,4,9,3,9,1001,9,1,9,4,9,3,9,1002,9,2,9,4,9,3,9,1002,9,2,9,4,9,3,9,1002,9,2,9,4,9,3,9,1002,9,2,9,4,9,3,9,101,2,9,9,4,9,3,9,1001,9,1,9,4,9,3,9,1001,9,1,9,4,9,99,3,9,1002,9,2,9,4,9,3,9,102,2,9,9,4,9,3,9,101,2,9,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,3,9,102,2,9,9,4,9,3,9,1001,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,99,3,9,101,2,9,9,4,9,3,9,102,2,9,9,4,9,3,9,1001,9,2,9,4,9,3,9,102,2,9,9,4,9,3,9,1001,9,2,9,4,9,3,9,101,2,9,9,4,9,3,9,102,2,9,9,4,9,3,9,1002,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,99,3,9,1001,9,2,9,4,9,3,9,1002,9,2,9,4,9,3,9,102,2,9,9,4,9,3,9,102,2,9,9,4,9,3,9,1002,9,2,9,4,9,3,9,101,1,9,9,4,9,3,9,101,1,9,9,4,9,3,9,1002,9,2,9,4,9,3,9,1002,9,2,9,4,9,3,9,1001,9,1,9,4,9,99]
 
--- binaryOp :: Program -> Int -> (Int -> Int -> Int) -> IO ()
--- binaryOp prog ip f = do
---   result <- f <$> readArg prog ip 1 <*> readArg prog ip 2
---   writeArg prog ip 3 result
-
--- jumpIfOp :: Program -> Int -> (Int -> Bool) -> IO Int
--- jumpIfOp prog ip shouldJump = do
---   shouldJump <$> readArg prog ip 1 >>= \case
---     False -> pure $ ip + 3
---     True -> readArg prog ip 2
-
--- boolToValue :: Bool -> Int
--- boolToValue True = 1
--- boolToValue False = 0
-
--- cmpOp :: Program -> Int -> (Int -> Int -> Bool) -> IO ()
--- cmpOp prog ip cmp = do
---   value <- cmp <$> readArg prog ip 1 <*> readArg prog ip 2
---   writeArg prog ip 3 (boolToValue value)
-
--- inputOp :: Program -> Int -> TChan Int -> IO ()
--- inputOp prog ip chan = do
---   atomically (readTChan chan) >>= writeArg prog ip 1
-
--- outputOp :: Program -> Int -> TChan Int -> IO ()
--- outputOp prog ip chan = do
---   val <- readArg prog ip 1
---   atomically $ writeTChan chan val
 
 -- d7_2_small_1 :: [Int]
 -- d7_2_small_1 = [3,26,1001,26,-4,26,3,27,1002,27,2,27,1,27,26, 27,4,27,1001,28,-1,28,1005,28,6,99,0,0,5]
@@ -317,3 +350,4 @@ main = do
 -- test :: IO ()
 -- test = do
 --   pure ()
+
