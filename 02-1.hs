@@ -25,21 +25,26 @@ type MachineWord = Integer
 type MachinePointer = Int
 type ArgumentNo = Int
 
+-- type OpcodeTable =
+
+
 data Program = Program { _programMemoryL :: IOArray MachinePointer MachineWord
                        , _programIpL :: MachinePointer
                        , _programRelativeBaseL :: MachinePointer
+                       , _programOnHaltL :: IO ()
+                       , _programInputOpL :: IO MachineWord
                        }
 makeFields ''Program
 
 newtype App a = App { runApp :: StateT Program IO a } deriving (Functor, Applicative, Monad, MonadIO, MonadState Program)
 
-makeRunnable :: [MachineWord] -> IO Program
-makeRunnable rawProgram = do
+makeRunnable :: [MachineWord] -> IO () -> IO MachineWord -> IO Program
+makeRunnable rawProgram onHalt inputOp = do
   let initialLength = fromIntegral (length rawProgram) - 1
   memory <- newListArray (0, initialLength) rawProgram
   let ip = 0
       relativeBase = 0
-  pure $ Program memory ip relativeBase
+  pure $ Program memory ip relativeBase onHalt inputOp
 
 ensureMemoryBigEnough :: MachinePointer -> App ()
 ensureMemoryBigEnough ptr = do
@@ -100,22 +105,26 @@ writeArg argNo value = do
     0 -> writeWord (fromIntegral arg) value
     2 -> writeWordRelativeBase (fromIntegral arg) value
 
-main :: IO ()
-main = do
-  p <- makeRunnable [ 0, 1, 2, 3, 4, 5 ]
-  let comp :: App () = do
-        let dump = liftIO . putStrLn . show
-        readWord 0 >>= dump
-        readWord 1 >>= liftIO . putStrLn . show
-        readWord 0 >>= liftIO . putStrLn . show
-        relativeBaseL .= 3
-        readWordRelativeIp 1 >>= dump
-        readWordRelativeBase (1) >>= dump
-        writeWordRelativeBase 100 42
-        readWordRelativeBase 100 >>= dump
-        readWord 103 >>= dump
-  execStateT (runApp comp) p
-  pure ()
+binaryOp :: (MachineWord -> MachineWord -> MachineWord) -> App ()
+binaryOp f = do
+  f <$> readArg 1 <*> readArg 2 >>= writeArg 3
+  ipL += 4
+
+inputOp :: App ()
+inputOp = do
+  val <- use inputOpL >>= liftIO
+  writeArg 1 val
+  ipL += 2
+
+run :: App ()
+run = go
+  where
+    go :: App ()
+    go = (`mod` 100) <$> readWordRelativeIp 0 >>= \case
+      1 -> binaryOp (+) >> go
+      2 -> binaryOp (*) >> go
+      3 -> inputOp >> go
+      99 -> use onHaltL >>= liftIO
 
 -- run :: Program -> TChan Int -> TChan Int -> TChan () -> IO ()
 -- run prog input output halt = void $ forkIO $ go 0
@@ -133,6 +142,51 @@ main = do
 --         8 -> cmpOp prog ip (==) >> go (ip + 4)
 --         99 -> void $ atomically $ writeTChan halt ()
 --         bad -> error $ "bad op " ++ show bad
+
+
+
+dump :: Show a => a -> App ()
+dump a = liftIO $ putStrLn $ show a
+
+
+mkListInput :: [MachineWord] -> IO (IO MachineWord)
+mkListInput elements = do
+  ref <- newIORef elements
+  pure $ do
+    elements <- readIORef ref
+    case elements of
+      (x:xs) -> do
+        writeIORef ref xs
+        pure x
+      _ ->
+        error "Ran out of input"
+
+mkListOutput :: IO (IORef [MachineWord], MachineWord -> IO ())
+mkListOutput = do
+  ref <- newIORef []
+  let appender x = do
+        modifyIORef ref (x:)
+  pure $ (ref, appender)
+
+main :: IO ()
+main = do
+  let scratch = [ 3, 50, 99, 52, 99, 51,  4, 51, 99,  0,
+                  5,  5,  0,  0,  0,  0,  0,  0,  0,  0,
+                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+                 42, 13,  0,  0,  0,  0,  0,  0,  0,  0
+                ]
+
+  input <- mkListInput [7]
+  (outputRef, output) <- mkListOutput
+  p <- makeRunnable scratch (putStrLn "halted") input output
+  let comp :: App () = do
+        run
+        readWord 50 >>= dump
+  execStateT (runApp comp) p
+  pure ()
+
 
 
 
