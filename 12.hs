@@ -4,6 +4,9 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 
+import Debug.Trace
+import Data.List
+import Control.Lens
 import Control.Loop
 import Criterion.Main
 import Data.Array.IO
@@ -61,6 +64,37 @@ applyGravityOneAxis thisC otherC thisV
 applyGravity :: Moon -> Moon -> Moon
 applyGravity (Moon tc@(tx, ty, tz) (tvx, tvy, tvz)) (Moon (ox, oy, oz) _) =
   Moon tc (applyGravityOneAxis tx ox tvx, applyGravityOneAxis ty oy tvy, applyGravityOneAxis tz oz tvz)
+
+
+type MoonAxis = (Int, Int)
+
+applyGravityMoonAxis :: MoonAxis -> MoonAxis -> MoonAxis
+applyGravityMoonAxis t@(tc, tv) (oc, ov)
+  | tc == oc = t
+  | tc < oc = (tc, tv + 1)
+  | otherwise = (tc, tv - 1)
+
+applyAxisCrossGravity :: [MoonAxis] -> [MoonAxis]
+applyAxisCrossGravity axes = go [] axes
+  where
+    go _ [] = []
+    go pre (x:xs) = foldl applyGravityMoonAxis x (pre ++ xs) : go (x:pre) xs
+
+splitMoonsIntoAxes :: [Moon] -> [(MoonAxis, MoonAxis, MoonAxis)]
+splitMoonsIntoAxes moons = split <$> moons
+  where
+    split :: Moon -> (MoonAxis, MoonAxis, MoonAxis)
+    split (Moon (x, y, z) (dx, dy, dz)) = ((x, dx), (y, dy), (z, dz))
+
+applyAxisSpeed :: [MoonAxis] -> [MoonAxis]
+applyAxisSpeed = fmap bump
+  where
+    bump (c, dc) = (c + dc, dc)
+
+axisSimulationStep :: [MoonAxis] -> [MoonAxis]
+axisSimulationStep = applyAxisSpeed . applyAxisCrossGravity
+
+
 
 -- applyCrossGravity :: [Moon] -> [Moon]
 -- applyCrossGravity moons = go [] moons
@@ -163,6 +197,18 @@ stepArray ms mCnt = do
   applySpeedArray ms mCnt
 
 
+lcm' :: Integral a => a -> a -> a
+lcm' a b = a * b `div` gcd' a b
+
+gcd' :: Integral a => a -> a -> a
+gcd' 0 b = b
+gcd' a 0 = a
+gcd' a b
+  | a < b = gcd' b a
+  | otherwise = let q = a `div` b
+                    r = a `rem` b
+                    -- a = b * q + r
+                in gcd' b r
 
 main :: IO ()
 main = do
@@ -170,23 +216,48 @@ main = do
     Left error -> throwIO $ ParsingException $ show error
     Right parsed -> pure $ flip Moon (0,0,0) <$> parsed
 
-  (moonsA, moonCnt) <- mkMoonsArray moons
-  original :: UArray Int Int <- freeze moonsA
+  let xAxes = view _1 <$> splitMoonsIntoAxes moons
+      yAxes = view _2 <$> splitMoonsIntoAxes moons
+      zAxes = view _3 <$> splitMoonsIntoAxes moons
 
-  let go stepNo = do
-        stepArray moonsA moonCnt
-        frozen <- unsafeFreeze moonsA
-        case frozen == original of
-          True -> pure stepNo
-          False -> go (stepNo + 1)
+      xSimulation = iterate axisSimulationStep xAxes
+      ySimulation = iterate axisSimulationStep yAxes
+      zSimulation = iterate axisSimulationStep zAxes
+
+      go initial simulation ctr
+        | head simulation == initial = ctr
+        | otherwise = go initial (tail simulation) (ctr + 1)
+
+      xLoop = go xAxes (tail xSimulation) 1
+      yLoop = go yAxes (tail ySimulation) 1
+      zLoop = go zAxes (tail zSimulation) 1
+
+      commonLoop :: Integer = lcm' (lcm' (fromIntegral zLoop) (fromIntegral yLoop)) (fromIntegral xLoop)
+
+  print xLoop
+  print yLoop
+  print zLoop
+  print commonLoop
+
+  -- (moonsA, moonCnt) <- mkMoonsArray moons
+  -- original :: UArray Int Int <- freeze moonsA
+
+  -- let go stepNo = do
+  --       stepArray moonsA moonCnt
+  --       frozen <- unsafeFreeze moonsA
+  --       case frozen == original of
+  --         True -> pure stepNo
+  --         False -> go (stepNo + 1)
 
   -- numLoop 1 2772 $ \_ -> stepArray moonsA moonCnt
-  go 1 >>= print
+  -- go 1 >>= print
 
-  l <- getElems moonsA
-  print l
+  -- l <- getElems moonsA
+  -- print l
 
-  -- -- sequence $ print <$> simulationStep (simulationStep moons)
+  -- sequence $ print <$> moons
+  -- putStrLn ""
+  -- sequence $ print <$> simulationStep moons
   -- putStrLn ""
   -- let simulation = iterate simulationStep moons
 
