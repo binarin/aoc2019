@@ -1,4 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -9,11 +12,14 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Main where
 
+import System.Exit (exitSuccess)
+import Control.Concurrent.MVar
 import Data.List.Extra (chunksOf)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C8
 import Graphics.Gloss
+import Graphics.Gloss.Interface.IO.Game
 import qualified Data.HashTable.IO as H
 import Control.Lens hiding (Empty)
 import Control.Lens.TH
@@ -23,10 +29,11 @@ import Data.Array.IO
 import Data.Array.ST (STArray, runSTArray)
 import Data.Array.MArray
 import Data.Array (Array, (!))
+import Control.Loop
 
 import Control.Exception (throwIO, Exception)
 import Control.Monad (forM_, when, foldM, forM, void, zipWithM)
-import Control.Concurrent.STM.TChan (TChan, newTChanIO, readTChan, writeTChan, unGetTChan, tryReadTChan, dupTChan)
+import Control.Concurrent.STM.TChan (TChan, newTChanIO, readTChan, writeTChan, unGetTChan, tryReadTChan, dupTChan, isEmptyTChan)
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent (forkIO)
 import Control.Monad.State.Strict
@@ -49,7 +56,15 @@ type HaltAction = IO ()
 type InputAction = IO MachineWord
 type OutputAction = MachineWord -> IO ()
 
+data Tile = Empty | Wall | Block | Padddle | Ball deriving (Eq, Show, Enum)
+
+data Arcade = Arcade { _arcadeInputL :: TChan MachineWord
+                     , _arcadeScreenRefL :: MVar (H.LinearHashTable (Int, Int) Tile)
+                     , _arcadeScoreRefL :: MVar MachineWord
+                     }
+
 makeFields ''Program
+makeFields ''Arcade
 
 
 makeRunnable :: [MachineWord] -> OpcodeTable -> IO Program
@@ -303,14 +318,14 @@ runDay11 = do
                 ]
       part1 = do
         prog <- makeRunnable d11 opcodes
-        runIntcode prog
+        runIntcode prog run
         result <- H.toList hull
         putStrLn $ show $ length result
 
       part2 = do
         prog <- makeRunnable d11 opcodes
         H.insert hull (0,0) True
-        runIntcode prog
+        runIntcode prog run
         allCells <- H.toList hull
         let cells = view _1 <$> filter (view _2) allCells
             panel (x, y) = Color white (Translate (fromIntegral x) (fromIntegral $ - y) square)
@@ -322,18 +337,16 @@ runDay11 = do
   part2
   pure ()
 
-runIntcode :: Program -> IO ()
-runIntcode p = void $ execStateT (runApp run) p
+runIntcode :: Program -> App a -> IO ()
+runIntcode p action = void $ execStateT (runApp action) p
 
 main :: IO ()
-main = runDay13
+main = runDay13Arcade
 
-
-data Tile = Empty | Wall | Block | Padddle | Ball deriving (Eq, Show, Enum)
 
 
 blockSize :: Int
-blockSize = 8
+blockSize = 16
 
 tileAt :: Int -> Int -> Picture -> Picture
 tileAt x y pic = Translate (fromIntegral $ x * blockSize) (negate $ fromIntegral $ y * blockSize) $ Scale (fromIntegral blockSize) (fromIntegral blockSize) pic
@@ -356,25 +369,93 @@ drawArcade output = Pictures $ go (reverse output)
     go (x:y:tile:rest) = tileAt (fromIntegral x) (fromIntegral y) (tileToPicture $ toEnum $ fromIntegral tile) : go rest
     go _ = []
 
+mkArcade :: IO (Arcade, InputAction, OutputAction, HaltAction)
+mkArcade = do
+  inputChan <- newTChanIO
+  let inputAction = do
+        atomically $ readTChan inputChan
 
+  screenHash :: H.LinearHashTable (Int, Int) Tile <- H.new
+  screen <- newMVar screenHash
+  buffer <- newIORef []
+  scoreRef <- newMVar 0
+
+  let replaceTile Empty _ = (Nothing, ())
+      replaceTile new _ = (Just new, ())
+
+      outputAction :: MachineWord -> IO ()
+      outputAction word = do
+        readIORef buffer >>= \case
+          (y:x:_)
+            | x < 0 -> modifyMVar_ scoreRef (const $ pure word)
+            | otherwise -> do
+                modifyMVar_ screen $ \hash -> do
+                  putStrLn $ "outputing " ++ show (x, y, word)
+                  H.mutate hash (fromIntegral x, fromIntegral y) (replaceTile $ toEnum $ fromIntegral word)
+                  pure hash
+                writeIORef buffer []
+          incomplete -> do
+            modifyIORef buffer (word:)
+
+  let arcade = Arcade inputChan screen scoreRef
+
+  let haltAction = do
+        readMVar scoreRef >>= print
+        exitSuccess
+
+  pure $ (arcade, inputAction, outputAction, haltAction)
+
+arcadeToPicture :: Arcade -> IO Picture
+arcadeToPicture arcade = do
+  cells <- modifyMVar (arcade^.screenRefL) $ \hash -> do
+    l <- H.toList hash
+    pure (hash ,l)
+  let go [] = [Blank]
+      go (((x, y), tile):rest) = tileAt x y (tileToPicture tile) : go rest
+  pure $ Pictures $ go cells
+
+runDay13Arcade :: IO ()
+runDay13Arcade = do
+  (arcade, inputAction, outputAction, haltAction) <- mkArcade
+
+  d13 <- readProgram "13.txt"
+
+  let opcodes = mkOpcodesTable (pureOpcodes ++ mkIoOpcodes haltAction inputAction outputAction)
+  p <- makeRunnable d13 opcodes
+  forkIO $ runIntcode p $ do
+    writeWord 0 2
+    run
+
+  let doStep time arcade = do
+        atomically (isEmptyTChan $ arcade^.inputL) >>= \case
+          True -> do
+            putStrLn "providing input"
+
+            numLoop 0 100 $ \_ -> atomically $ writeTChan (arcade^.inputL) 1
+
+          False -> pure ()
+        pure arcade
+
+  playIO
+    (InWindow "Nice Window" (200, 200) (10, 10))
+    black
+    25
+    arcade
+    arcadeToPicture
+    (\event arcade -> pure arcade)
+    doStep
+
+  pure ()
 
 runDay13 :: IO ()
 runDay13 = do
-  let scratch = [ 4, 50,  3, 50,  4, 50, 99, 51, 99,  0,
-                  5,  5,  0,  0,  0,  0,  0,  0,  0,  0,
-                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-                  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-                 42, 13,  0,  0,  0,  0,  0,  0,  0,  0
-                ]
-
   inputAction <- mkListInput []
   (outputRef, outputAction) <- mkListOutput
   let haltAction = putStrLn "halted"
       opcodes = mkOpcodesTable (pureOpcodes ++ mkIoOpcodes haltAction inputAction outputAction)
   d13 <- readProgram "13.txt"
   p <- makeRunnable d13 opcodes
-  runIntcode p
+  runIntcode p run
   output <- readIORef outputRef
   let chunked :: [[MachineWord]] = chunksOf 3 $ reverse output
 
