@@ -343,10 +343,8 @@ runIntcode p action = void $ execStateT (runApp action) p
 main :: IO ()
 main = runDay13Arcade
 
-
-
 blockSize :: Int
-blockSize = 16
+blockSize = 8
 
 tileAt :: Int -> Int -> Picture -> Picture
 tileAt x y pic = Translate (fromIntegral $ x * blockSize) (negate $ fromIntegral $ y * blockSize) $ Scale (fromIntegral blockSize) (fromIntegral blockSize) pic
@@ -387,10 +385,11 @@ mkArcade = do
       outputAction word = do
         readIORef buffer >>= \case
           (y:x:_)
-            | x < 0 -> modifyMVar_ scoreRef (const $ pure word)
+            | x < 0 -> do
+                modifyMVar_ scoreRef (const $ pure word)
+                writeIORef buffer []
             | otherwise -> do
                 modifyMVar_ screen $ \hash -> do
-                  putStrLn $ "outputing " ++ show (x, y, word)
                   H.mutate hash (fromIntegral x, fromIntegral y) (replaceTile $ toEnum $ fromIntegral word)
                   pure hash
                 writeIORef buffer []
@@ -429,9 +428,7 @@ runDay13Arcade = do
   let doStep time arcade = do
         atomically (isEmptyTChan $ arcade^.inputL) >>= \case
           True -> do
-            putStrLn "providing input"
-
-            numLoop 0 100 $ \_ -> atomically $ writeTChan (arcade^.inputL) 1
+            atomically $ writeTChan (arcade^.inputL) 0
 
           False -> pure ()
         pure arcade
@@ -439,7 +436,7 @@ runDay13Arcade = do
   playIO
     (InWindow "Nice Window" (200, 200) (10, 10))
     black
-    25
+    60
     arcade
     arcadeToPicture
     (\event arcade -> pure arcade)
