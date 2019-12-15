@@ -161,9 +161,79 @@ mapToPicture m = Pictures $
 findTank :: Map -> Point
 findTank m = fst $ head $ filter (\(_, c) -> c == OxygenTank) (M.toList m)
 
+type ShortestMap = M.Map Point (Int, Cell)
+
+shortestPathRound :: ShortestMap -> ShortestMap
+shortestPathRound m =
+  let pickLeastRoute a@(_, (aCost, _)) b@(_, (bCost, _))
+        | aCost <= bCost = a
+        | otherwise = b
+      (leastCoord, (leastCost, leastCell)) = foldl1 pickLeastRoute (M.toList m)
+
+      candidates = flip advance leastCoord <$> allDirections
+
+      validTarget c =
+        case M.lookup c m of
+          Just (_, Empty) -> True
+          Just (_, OxygenTank) -> True
+          Nothing -> False
+
+      targets = filter validTarget candidates
+
+      applyTarget :: ShortestMap -> Point -> ShortestMap
+      applyTarget m c =
+        let Just (oldCost, oldCell) = M.lookup c m
+            newCost = leastCost + 1
+        in if oldCost <= newCost
+           then m
+           else M.insert c (newCost, oldCell) m
+
+  in if leastCell == OxygenTank
+     then m
+     else M.delete leastCoord (foldl applyTarget m targets)
+
+mapToShortestMap :: Map -> ShortestMap
+mapToShortestMap = M.filter (\(_, c) -> c /= Wall) . M.map (\cell -> (maxBound, cell))
+
+takeWhileUnique :: Eq a => [a] -> [a]
+takeWhileUnique [] = []
+takeWhileUnique [a] = [a]
+takeWhileUnique (a:b:rest)
+  | a == b = [a]
+  | otherwise = a : takeWhileUnique (b:rest)
+
+oxigenate :: Map -> Map
+oxigenate m =
+  let currentlyOxygenized = [ pos | (pos, OxygenTank) <- M.toList m]
+      targets = concatMap (\c -> flip advance c <$> allDirections) currentlyOxygenized
+      validTarget c = case M.lookup c m of
+                        Just Empty -> True
+                        _ -> False
+      validTargets = filter validTarget targets
+
+  in foldl (\m c -> M.insert c OxygenTank m) m validTargets
+
 main :: IO ()
 main = do
   knownMap <- plot
+
   -- display (InWindow "Nice Window" (200, 200) (10, 10)) red (mapToPicture knownMap)
-  print $ findTank knownMap
+  simulate
+    (InWindow "Nice Window" (200, 200) (10, 10))
+    red
+    50
+    knownMap
+    mapToPicture
+    (\_ _ m -> oxigenate m)
+
+  let spIn = M.insert (0, 0) (0, Empty) $ mapToShortestMap knownMap
+      tankCoord = findTank knownMap
+      steps = takeWhileUnique $ iterate shortestPathRound spIn
+
+      oxygenSteps = takeWhileUnique $ iterate oxigenate knownMap
+      countOxygen = M.foldr (\c a -> if c == OxygenTank then a + 1 else a) 0
+
+  -- sequence $ print . M.size <$> steps
+  print $ M.lookup tankCoord (last steps)
+  print $ length oxygenSteps - 1
   pure ()
