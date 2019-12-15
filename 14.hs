@@ -1,6 +1,8 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 module Main where
 
+import Debug.Trace
 import Control.Lens
 import Data.Bool (bool)
 import qualified Data.Map.Strict as M
@@ -11,8 +13,6 @@ import Text.Parsec.ByteString (Parser, parseFromFile)
 import Text.Parsec.Char
 import Text.Parsec
 
-type Element = String
-
 data ParsingException = ParsingException String deriving (Show)
 instance Exception ParsingException
 
@@ -22,83 +22,97 @@ intParser = do
   numbersString <- read <$> many1 digit
   pure $ negative numbersString
 
-elementWithCountParser :: Parser (Element, Int)
+elementWithCountParser :: Parser (Element, Count)
 elementWithCountParser = do
   count <- intParser
   char ' '
   element <- many1 letter
   pure $ (element, count)
 
-reactionParser :: Parser (Element, Int, [(Element, Int)])
+reactionParser :: Parser (Element, Count, [(Element, Count)])
 reactionParser = do
   sources <- elementWithCountParser `sepBy` (string ", ")
   string " => "
   (elt, cnt) <- elementWithCountParser
   pure (elt, cnt, sources)
 
-reactionFileParser :: Parser [(Element, Int, [(Element, Int)])]
+reactionFileParser :: Parser [(Element, Count, [(Element, Count)])]
 reactionFileParser = endBy reactionParser newline
 
-readReactions :: FilePath -> IO [(Element, Int, [(Element, Int)])]
+readReactions :: FilePath -> IO [(Element, Count, [(Element, Count)])]
 readReactions path = parseFromFile reactionFileParser path >>= \case
   Left error -> throwIO $ ParsingException $ show error
   Right parsed -> pure parsed
 
+type Count = Int
+type ReactionMap = Map Element (Count, [(Element, Count)])
+type Element = String
+type Reactor = Map Element Count
 
-type ReactionMap = Map Element (Int, [(Element, Int)])
-
-mkReactionsMap :: [(Element, Int, [(Element, Int)])] -> ReactionMap
+mkReactionsMap :: [(Element, Count, [(Element, Count)])] -> ReactionMap
 mkReactionsMap = M.fromList . fmap toMapElement
   where
     toMapElement (elt, cnt, parts) = (elt, (cnt, parts))
 
-type Wants = Map Element Int
+divUp :: Integral a => a -> a -> a
+divUp a b
+  | a `rem` b == 0 = a `div` b
+  | otherwise = a `div` b + 1
 
-expandElementWants :: ReactionMap -> Element -> Int -> [(Element, Int)]
-expandElementWants m elt cnt
-  | elt == "ORE" = [(elt, cnt)]
+
+react :: ReactionMap -> Reactor -> Reactor
+react rm r = if null negativeNonOre then r else r'
+  where
+    negativeNonOre = filter (\(e, c) -> c < 0 && e /= "ORE") (M.toList r)
+    (firstNegativeElt, negativeCount) = head negativeNonOre
+    missingCount = - negativeCount
+    r' =
+      let Just (outCnt, inputs) = M.lookup firstNegativeElt rm
+          mult = missingCount `divUp` outCnt
+          negativeInuputsMultiples = (\(elt, cnt) -> (elt, - cnt * mult )) <$> inputs
+          updates = (firstNegativeElt, outCnt * mult):negativeInuputsMultiples
+      in foldr (\(elt, cnt) r -> M.insertWith (+) elt cnt r) r updates
+
+takeWhileUnique :: Eq a => [a] -> [a]
+takeWhileUnique [] = []
+takeWhileUnique [a] = [a]
+takeWhileUnique (a:b:rest)
+  | a == b = [a]
+  | otherwise = a : takeWhileUnique (b:rest)
+
+oreForFuel :: ReactionMap -> Count -> Count
+oreForFuel rmap cnt =
+  let reactor = M.singleton "FUEL" (-cnt)
+      steps = iterate (react rmap) reactor
+      Just solution = M.lookup "ORE" (last $ takeWhileUnique steps)
+  in -solution
+
+hasOre :: Count
+hasOre = 1_000_000_000_000
+
+binarySearch :: ReactionMap -> Count -> Count -> Count
+binarySearch rmap low high
+  | low > high = high
+  | low == high = low
   | otherwise =
-      let Just (rOut, parts) = M.lookup elt m
-          uneven = cnt `rem` rOut /= 0
-          mult = cnt `div` rOut + bool 0 1 uneven
-      in over _2 (*mult) <$> parts
-
--- expandWants :: ReactionMap -> Wants -> Wants
--- expandWants  = foldl (\nm (elt, cnt) -> M.insertWith (+) elt cnt nm) M.empty (toList
-
-expansionRound :: ReactionMap -> Wants -> Wants
-expansionRound rm ws =
-  let expanded = mconcat $ uncurry (expandElementWants rm) <$> M.toList ws
-      addToWants ws (elt, cnt) = M.insertWith (+) elt cnt ws
-  in foldl addToWants M.empty expanded
-
+    let middle = low + (high - low) `div` 2
+        middleSolution = oreForFuel rmap middle
+    in case (show middleSolution) `trace` middleSolution of
+      _
+       | middleSolution == hasOre -> 1
+       | middleSolution < hasOre -> 2
+       | otherwise -> 3
 
 main :: IO ()
 main = do
-  rs <- readReactions "14-sample3.txt"
+  rs <- readReactions "14.txt"
   let rmap = mkReactionsMap rs
-      expander = expansionRound rmap
-      expansions = iterate expander (M.singleton "FUEL" 1)
-      solution = takeWhile (\m -> M.size m /= 1) (tail expansions)
+      upperBound = 10_000_000
+      solution = oreForFuel rmap upperBound
 
-  sequence $ print <$> take 10 expansions
-
-  let sec = expansions !! 2
-  putStrLn "SEC:"
-  sequence $ print <$> M.toList sec
-  putStrLn "\nEXP:"
-  sequence $ print <$> (uncurry (expandElementWants rmap) <$> M.toList sec)
-
-  -- print $ solution
-  -- sequence $ print <$> head solution
-  -- print $ expansionRound rmap (M.singleton "AB" 2)
-  -- print $ expansionRound rmap (M.singleton "BC" 3)
-  -- print $ expansionRound rmap (M.singleton "CA" 4)
-  -- print $ expansionRound rmap (M.singleton "A" 10)
-  -- print $ expansionRound rmap (M.singleton "B" 23)
-  -- print $ expansionRound rmap (M.singleton "C" 37)
+  -- sequence $ print <$> takeWhileUnique steps
+  print $ binarySearch rmap 1 upperBound
   pure ()
-
 -- want 1 FUEL, have nothing
 -- want [2 AB, 3 BC, 4 CA]
 -- want [6 A, 8 B, 15 B, 21 C, 3 BC, 4 CA] -> [6 A, 23 B, 21 C, 3 BC, 4 CA]
