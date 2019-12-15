@@ -61,9 +61,9 @@ data Program = Program { _programMemoryL :: IOArray MachinePointer MachineWord
                        }
 newtype App a = App { runApp :: StateT Program IO a } deriving (Functor, Applicative, Monad, MonadIO, MonadState Program)
 
-type HaltAction = IO ()
-type InputAction = IO MachineWord
-type OutputAction = MachineWord -> IO ()
+type HaltAction = App ()
+type InputAction = App MachineWord
+type OutputAction = MachineWord -> App ()
 
 
 makeFields ''Program
@@ -166,7 +166,7 @@ binaryOp f = do
 
 inputOp :: InputAction -> App ()
 inputOp action = do
-  value <- liftIO $ action
+  value <- action
   writeArg 1 value
   ipL += 2
 
@@ -189,11 +189,11 @@ pureOpcodes = [(1, binaryOp (+))
 haltOp :: HaltAction -> App ()
 haltOp halt = do
   haltedL .= True
-  liftIO $ halt
+  halt
 
 outputOp :: OutputAction -> App ()
 outputOp action = do
-  readArg 1 >>= liftIO . action
+  readArg 1 >>= action
   ipL += 2
 
 jumpIfOp :: (MachineWord -> Bool) -> App ()

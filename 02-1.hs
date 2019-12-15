@@ -111,7 +111,7 @@ runDay11 = do
           [] -> do
             writeIORef inputBuffer [value]
 
-      opcodes = mkOpcodesTable $ pureOpcodes ++ mkIoOpcodes haltAction inputAction outputAction
+      opcodes = mkOpcodesTable $ pureOpcodes ++ mkIoOpcodes (liftIO haltAction) (liftIO inputAction) (liftIO . outputAction)
 
       scratch = [104, 1, 99, 50,  4, 50, 99, 51, 99,  0,
                   5,  5,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -203,7 +203,7 @@ mkArcade = do
         readMVar scoreRef >>= print
         exitSuccess
 
-  pure $ (arcade, inputAction, outputAction, haltAction)
+  pure $ (arcade, liftIO inputAction, liftIO . outputAction, liftIO haltAction)
 
 arcadeToPicture :: Arcade -> IO Picture
 arcadeToPicture arcade = do
@@ -250,7 +250,7 @@ runDay13 = do
   inputAction <- mkListInput []
   (outputRef, outputAction) <- mkListOutput
   let haltAction = putStrLn "halted"
-      opcodes = mkOpcodesTable (pureOpcodes ++ mkIoOpcodes haltAction inputAction outputAction)
+      opcodes = mkOpcodesTable (pureOpcodes ++ mkIoOpcodes (liftIO haltAction) (liftIO inputAction) (liftIO . outputAction))
   d13 <- readProgram "13.txt"
   p <- makeRunnable d13 opcodes
   runIntcode p runVM
@@ -275,7 +275,7 @@ runDay8 = do
   inputAction <- mkListInput [2]
   (outputRef, outputAction) <- mkListOutput
   let haltAction = putStrLn "halted"
-      ioOpcodes = mkIoOpcodes haltAction inputAction outputAction
+      ioOpcodes = mkIoOpcodes (liftIO haltAction) (liftIO inputAction) (liftIO . outputAction)
       opcodes = pureOpcodes ++ ioOpcodes
 
   p <- makeRunnable selfCopy (mkOpcodesTable opcodes)
