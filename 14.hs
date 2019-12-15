@@ -2,7 +2,6 @@
 {-# LANGUAGE NumericUnderscores #-}
 module Main where
 
-import Debug.Trace
 import Control.Lens
 import Data.Bool (bool)
 import qualified Data.Map.Strict as M
@@ -92,16 +91,15 @@ hasOre = 1_000_000_000_000
 
 binarySearch :: ReactionMap -> Count -> Count -> Count
 binarySearch rmap low high
-  | low > high = high
-  | low == high = low
+  | low + 1 >= high = low
   | otherwise =
     let middle = low + (high - low) `div` 2
         middleSolution = oreForFuel rmap middle
-    in case (show middleSolution) `trace` middleSolution of
+    in case middleSolution of
       _
-       | middleSolution == hasOre -> 1
-       | middleSolution < hasOre -> 2
-       | otherwise -> 3
+       | middleSolution == hasOre -> middle
+       | middleSolution < hasOre -> binarySearch rmap middle high
+       | otherwise -> binarySearch rmap low middle
 
 main :: IO ()
 main = do
