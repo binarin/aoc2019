@@ -1,7 +1,26 @@
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Main where
 
+import Debug.Trace
+import GHC.Stack
+import Control.Lens
+import Control.Lens.TH
 import Data.Char
-import Data.Array.IO
+import Data.Array.Unboxed as A
+
+data Ray = Ray { _rayNumberL :: Int
+               , _rayLowL :: Int
+               , _rayHighL :: Int
+               , _rayValueL :: Int
+               } deriving (Show)
+makeFields ''Ray
 
 basePattern :: [Int]
 basePattern = [0, 1, 0, -1]
@@ -10,14 +29,6 @@ eltPattern :: Int -> [Int]
 eltPattern n = tail $ cycle $ concatMap (replicate n) basePattern
 
 type Width = Int
-type RayNo = Int
-type Ray = (RayNo, Bool, Int, Int)
-
-adjustRays :: Int -> [Ray] -> (Ray, [Int], [Int])
-adjustRays width rays = go rays
-  where
-
-
 
 testInput :: [Int]
 testInput = [1,2,3,4,5,6,7,8]
@@ -48,16 +59,93 @@ decode = fmap (\c -> ord c - ord '0')
 encode :: [Int] -> String
 encode = fmap (\i -> chr (i + ord '0'))
 
+-- mkRay :: Int -> Int -> Ray
+-- mkRay n v = Ray n (2 * n - 1) (2 * n - 1) v
 
+-- 1: 1,1+     2,3+      3,5+      4,7+
+-- 2: 3,3-     6,7-      9,11-     12,15-
+-- 3: 5,5+     10,11+    15,17     20,23
+-- 4: 7,7-     14,15-    21,23-
 
+type Input = Array Int Int
 
+advanceRay :: Input -> Ray -> Maybe Ray
+advanceRay input fr@(Ray rayNo low high value) =
+  if low' > upperBound
+  then Nothing
+  else Just $ Ray rayNo low' high' value'
+  where
+    (_, upperBound) = bounds input
+    stride = rayNo * 2 - 1
+    currentGen = low `div` stride
+    low' = stride * (currentGen + 1)
+    width = high - low
+    high' = min (low' + width + 1) upperBound
+    discardRange' = [low..min (low'-1) high]
+    discardRange = discardRange'
+    injectRange = [max (high+1) low'..high']
+    removeValue = sum $ (input!) <$> discardRange
+    addValue = sum $ (input!) <$> injectRange
+    raySign = if rayNo `rem` 2 == 1 then 1 else (-1)
+    value' = value - raySign * removeValue + raySign * addValue
 
+projectRay :: Input -> Ray -> [Ray]
+projectRay input ray = go ray
+  where
+    go ray = case advanceRay input ray of
+               Nothing -> [ray]
+               Just ray' -> ray:go ray'
+
+mkRay :: Input -> Int -> Ray
+mkRay input rayNo = Ray rayNo idx idx (raySign * (input ! idx))
+  where idx = (2 * rayNo - 1)
+        raySign = if rayNo `rem` 2 == 1 then 1 else (-1)
+
+runPhase' :: Input -> Input
+runPhase' input =
+  let (_, upperBound) = bounds input
+      numRays = upperBound `div` 2 + upperBound `rem` 2
+      rayProgression = [ projectRay input (mkRay input rayNo) | rayNo <- [1..numRays] ]
+
+      progress :: [[Ray]] -> [[Ray]]
+      progress = filter (not . null) . fmap tail
+
+      currentValue :: [[Ray]] -> Int
+      currentValue r = abs (sum (view valueL <$> fmap head r)) `rem` 10
+
+      go :: [[Ray]] -> [Int]
+      go [] = []
+      go rp = currentValue rp : go (progress rp)
+
+  in listArray (1, upperBound) (go rayProgression)
 
 main :: IO ()
 main = do
+  let input = part2Input
+      inputLen = length input
+      inputA = listArray (1, inputLen) input
+      phases = iterate runPhase' inputA
+
+  putStrLn $ encode $ take 8 $ A.elems $ phases !! 1
+
+  -- sequence $ print <$> (take 10 $ projectRay $ mkRay 2)
   -- let iterations = iterate runPhase part2Input
   -- print $ encode $ take 8 $ iterations !! 2
-  let sample = 30
+
+  --   1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+  --   1  0 -1  0  1  0 -1  0  1  0 -1  0
+  --  1,1+  3,3- 5,5+  7,7-   9,9+  11,11-
+
+  --   0  1  1  0  0 -1  -1 0  0  1  1  0  0 -1 -1  0  0
+  --       2,3+      6,7-        10,11+      14,15-
+
+  --   0  0  1  1  1  0  0  0 -1 -1 -1  0  0  0  1  1  1  0  0  0 -1 -1 -1
+  --          3,5+             9,11-               15,17+           21,23-
+
+  --   0  0  0  1  1  1  1  0  0  0  0 -1 -1 -1 -1  0  0  0  0 -1 -1 -1 -1
+  --             4,7+                   12,15-                   20,23+
+
+  let sample = 8
       signs = take sample . eltPattern <$> [1..sample]
       visualize s
         | s == 0 = ' '
