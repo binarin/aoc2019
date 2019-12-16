@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
@@ -47,8 +48,14 @@ testInput2 = decode "80871224585914546619083218645595"
 testInput3 :: [Int]
 testInput3 = decode "19617804207202209144916044189917"
 
+testInput4 :: [Int]
+testInput4 = decode "03036732577212944063491565474664"
+
 realInput :: [Int]
 realInput = decode "59754835304279095723667830764559994207668723615273907123832849523285892960990393495763064170399328763959561728553125232713663009161639789035331160605704223863754174835946381029543455581717775283582638013183215312822018348826709095340993876483418084566769957325454646682224309983510781204738662326823284208246064957584474684120465225052336374823382738788573365821572559301715471129142028462682986045997614184200503304763967364026464055684787169501819241361777789595715281841253470186857857671012867285957360755646446993278909888646724963166642032217322712337954157163771552371824741783496515778370667935574438315692768492954716331430001072240959235708"
+
+tenThousand :: [Int] -> [Int]
+tenThousand = mconcat . replicate 10000
 
 part2Input :: [Int]
 part2Input = mconcat $ replicate 10000 realInput
@@ -121,12 +128,17 @@ runPhase' input =
 
 main :: IO ()
 main = do
-  let input = part2Input
+  let input = tenThousand testInput4
       inputLen = length input
       inputA = listArray (1, inputLen) input
       phases = iterate runPhase' inputA
 
-  putStrLn $ encode $ take 8 $ A.elems $ phases !! 1
+      offset :: Int = read $ encode (take 7 input)
+
+      solution = phases !! 100
+
+  print $ encode $ take 8 $ drop offset $ elems solution
+  -- putStrLn $ encode $ take 8 $ A.elems $ phases !! 1
 
   -- sequence $ print <$> (take 10 $ projectRay $ mkRay 2)
   -- let iterations = iterate runPhase part2Input
