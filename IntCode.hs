@@ -232,21 +232,21 @@ mkOpcodesTable opcodes = runSTArray $ do
   forM_ opcodes $ \(opcode, action) -> writeArray table opcode action
   pure table
 
-mkListInput :: [MachineWord] -> IO (IO MachineWord)
+mkListInput :: [MachineWord] -> IO (App MachineWord)
 mkListInput elements = do
   ref <- newIORef elements
   pure $ do
-    elements <- readIORef ref
+    elements <- liftIO $ readIORef ref
     case elements of
       (x:xs) -> do
-        writeIORef ref xs
+        liftIO $ writeIORef ref xs
         pure x
       _ ->
         error "Ran out of input"
 
-mkListOutput :: IO (IORef [MachineWord], MachineWord -> IO ())
+mkListOutput :: IO (IORef [MachineWord], MachineWord -> App ())
 mkListOutput = do
   ref <- newIORef []
   let appender x = do
-        modifyIORef ref (x:)
+        liftIO $ modifyIORef ref (x:)
   pure $ (ref, appender)
