@@ -9,6 +9,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Main where
 
+import Control.Loop
+import Data.IORef
 import Debug.Trace
 import GHC.Stack
 import Control.Lens
@@ -111,7 +113,7 @@ mkRay input rayNo = Ray rayNo idx idx (raySign * (input ! idx))
 runPhase' :: Input -> Input
 runPhase' input =
   let (_, upperBound) = bounds input
-      numRays = upperBound `div` 2 + upperBound `rem` 2
+      numRays = 1 -- upperBound `div` 2 + upperBound `rem` 2
       rayProgression = [ projectRay input (mkRay input rayNo) | rayNo <- [1..numRays] ]
 
       progress :: [[Ray]] -> [[Ray]]
@@ -126,18 +128,38 @@ runPhase' input =
 
   in listArray (1, upperBound) (go rayProgression)
 
+-- produces correct values only for the second half of the input
+fftSingleRay :: [Int] -> [Int]
+fftSingleRay elts = snd (foldr (\elt (ctr, xs) ->(ctr + elt, ((ctr + elt) `rem` 10):xs)) (0, []) elts)
+
+
 main :: IO ()
 main = do
-  let input = tenThousand testInput4
+  let input = tenThousand realInput
       inputLen = length input
-      inputA = listArray (1, inputLen) input
-      phases = iterate runPhase' inputA
+      -- inputA :: Input = listArray (1, inputLen) input
+      -- phases = iterate runPhase' inputA
 
-      offset :: Int = read $ encode (take 7 input)
+      solutionOffset :: Int = read $ encode (take 7 input)
 
-      solution = phases !! 100
+      inputCappedA :: Input = listArray (1 + solutionOffset, inputLen) (drop solutionOffset input)
 
-  print $ encode $ take 8 $ drop offset $ elems solution
+  print $ bounds inputCappedA
+
+  let steps = iterate fftSingleRay (drop solutionOffset input)
+  print $ encode $ take 8 $ steps !! 100
+
+  -- ref <- newIORef inputA
+  -- numLoop 1 1 $ \_ -> do
+  --   inp <- readIORef ref
+  --   let result = runPhase' inp
+  --   writeIORef ref (result `seq` result)
+
+  -- after <- readIORef ref
+  -- print $ encode $ take 8 $ drop offset $ elems after
+
+  -- print $ encode $ take 8 $ drop offset $ elems $ foldr runPhase' inputA
+  -- print $ encode $ take 8 $ drop offset $ elems solution
   -- putStrLn $ encode $ take 8 $ A.elems $ phases !! 1
 
   -- sequence $ print <$> (take 10 $ projectRay $ mkRay 2)
@@ -157,6 +179,10 @@ main = do
   --   0  0  0  1  1  1  1  0  0  0  0 -1 -1 -1 -1  0  0  0  0 -1 -1 -1 -1
   --             4,7+                   12,15-                   20,23+
 
+  pure ()
+
+plotRays :: IO ()
+plotRays = do
   let sample = 8
       signs = take sample . eltPattern <$> [1..sample]
       visualize s
