@@ -154,8 +154,7 @@ allKeyMoves level m ks pt bound
       in if null candidates
          then -- ("base", reverse level, ks, bound) `traceShow`
            0
-         else -- (level, ks, bound) `traceShow`
-           foldr pickSmallest bound candidates
+         else (level, ks, bound) `traceShow` foldr pickSmallest bound candidates
 
 
 main :: IO ()
