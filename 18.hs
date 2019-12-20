@@ -23,6 +23,7 @@ import qualified Data.Set as S
 import qualified Data.PSQueue as PSQ
 import Data.PSQueue (Binding((:->)))
 import Data.Char (toLower)
+import Data.IORef
 
 data Cell = Empty | Wall | Entrance | Key Char | Door Char deriving (Eq, Show)
 
@@ -156,13 +157,35 @@ allKeyMoves level m ks pt bound
            0
          else (level, ks, bound) `traceShow` foldr pickSmallest bound candidates
 
+type SearchNode = (S.Set Char, Point)
+
+allKeyMoves' :: Map -> Point -> IO Int
+allKeyMoves' m startingPoint = do
+  let startNode :: SearchNode = (S.empty, startingPoint)
+      startQueue = PSQ.singleton startNode 0
+  queueRef <- newIORef startQueue
+
+  let go = do
+        q <- readIORef queueRef
+        case PSQ.minView q of
+          Nothing -> pure ()
+          Just ((ks, pt) :-> cost, q') -> do
+            let moves = reachableKeys m ks pt
+                addReachableToQueue q (rCh, rPt, rCost) =
+                  PSQ.insert (S.insert rCh ks, rPt) (rCost + cost) q
+                q'' = foldl addReachableToQueue q' moves
+            pure ()
+
+  pure 10
+
 main :: IO ()
 main = do
-  parsed <- parseMap <$> readFile "18.txt"
-  print parsed
+  parsed <- parseMap <$> readFile "18-sample1.txt"
+  -- print parsed
   let entrance = findCell parsed Entrance
   putStrLn $ "Entrace at " ++ show entrance
   print $ reachableKeys parsed S.empty entrance
   -- print $ reachableKeys parsed (S.singleton 'a') (17, 1)
   -- print $ allKeyMoves "" parsed S.empty entrance maxBound
+  allKeyMoves' parsed entrance >>= print
   pure ()
