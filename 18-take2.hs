@@ -78,6 +78,7 @@ parseMap asRead =
 
   in Map padWidth padHeight (V.fromList $ fromChar <$> concat allRows)
 
+-- so the only loop in the map is the 3x3 empty square near entrance
 optimizeMap :: Map -> Map
 optimizeMap (Map w h cells) =
   let cells' = runST $ do
