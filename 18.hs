@@ -180,12 +180,12 @@ allKeyMoves' m startingPoint = do
 
 main :: IO ()
 main = do
-  parsed <- parseMap <$> readFile "18-sample1.txt"
+  parsed <- parseMap <$> readFile "18.txt"
   -- print parsed
   let entrance = findCell parsed Entrance
   putStrLn $ "Entrace at " ++ show entrance
   print $ reachableKeys parsed S.empty entrance
   -- print $ reachableKeys parsed (S.singleton 'a') (17, 1)
   -- print $ allKeyMoves "" parsed S.empty entrance maxBound
-  allKeyMoves' parsed entrance >>= print
+  -- allKeyMoves' parsed entrance >>= print
   pure ()
