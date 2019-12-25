@@ -25,17 +25,17 @@ data Map2D a = Map { _mapWidthL :: Int
                    , _mapCellsL :: Vector a
                    } deriving (Eq, Show)
 
-parseMap2D :: a -> (Char -> a) -> ByteString -> Map2D a
-parseMap2D pad parse asRead =
+parseMap2D :: (Char -> a) -> ByteString -> Map2D a
+parseMap2D parse asRead =
   let strings = C8.unpack asRead
       rows = lines strings
       height = length rows
       width = length $ head rows
   in Map width height (V.fromList $ concat $ (fmap parse) <$> rows)
 
-readMap2D :: a -> (Char -> a) -> FilePath -> IO (Map2D a)
-readMap2D pad parse path = do
-  parseMap2D pad parse <$> B.readFile path
+readMap2D :: (Char -> a) -> FilePath -> IO (Map2D a)
+readMap2D parse path = do
+  parseMap2D parse <$> B.readFile path
 
 showMap2D :: (a -> String) -> Map2D a -> String
 showMap2D conv (Map w h cs) =

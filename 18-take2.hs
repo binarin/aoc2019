@@ -10,6 +10,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
 
+import Data.Bit
 import Data.STRef
 import Debug.Trace
 import Control.Loop
@@ -18,42 +19,24 @@ import Control.Monad
 import Control.Monad.Extra
 import Data.List
 import Data.Char
+import qualified Data.IntPSQ as PSQ
 import qualified Data.Vector as V
 import qualified Data.Vector.Mutable as MV
 import Data.Vector (Vector, (!))
 import qualified Data.Set as S
-import Control.Lens hiding (Empty)
-import Control.Lens.TH
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as C8
+
+import Map2D
 
 data Cell = Empty | Wall | Entrance | Key Char | Door Char deriving (Eq, Show)
 
-type Coord = Int
-type Width = Coord
-type Height = Coord
+type Map = Map2D Cell
 type KeySet = S.Set Char
-type Point = (Coord, Coord)
 
-data Map = Map { _mapWidthL :: Width
-               , _mapHeightL :: Height
-               , _mapCellsL :: Vector Cell
-               }
-
-instance Show Map where
-  show (Map w h cells) =
-    let showRow y = concat [ toChar (cells ! (x + y * w)) | x <- [0..w-1] ] ++ "\n"
-        toChar Empty = " "
-        toChar Wall = "█"
-        toChar Entrance = "@"
-        toChar (Key c) = [c]
-        toChar (Door c) = [toUpper c]
-      in concatMap showRow [0..h-1]
-
-
-makeFields ''Map
-
+toChar Empty = " "
+toChar Wall = "█"
+toChar Entrance = "@"
+toChar (Key c) = [c]
+toChar (Door c) = [toUpper c]
 
 fromChar :: Char -> Cell
 fromChar '.' = Empty
@@ -63,20 +46,6 @@ fromChar c
   | c >= 'a' && c <= 'z' = Key c
   | c >= 'A' && c <= 'Z' = Door (toLower c)
 fromChar c = error $ "Unparsable char " ++ [c]
-
-parseMap :: ByteString -> Map
-parseMap asRead =
-  let strings = C8.unpack asRead
-      rows = lines strings
-      height = length rows
-      width = length $ head rows
-      padWidth = width + 2
-      padRow = replicate padWidth '#'
-      padHeight = height + 2
-      paddedRows = (\r -> "#" ++ r ++ "#") <$> rows
-      allRows = [padRow] ++ paddedRows ++ [padRow]
-
-  in Map padWidth padHeight (V.fromList $ fromChar <$> concat allRows)
 
 -- so the only loop in the map is the 3x3 empty square near entrance
 optimizeMap :: Map -> Map
@@ -111,10 +80,55 @@ optimizeMap (Map w h cells) =
   in Map w h cells'
 
 
+pointsOfInterest :: Map -> [(Int, Cell)]
+pointsOfInterest (Map _ _ m) = V.toList $ V.filter interesting $ V.indexed m
+  where
+    interesting (_, Entrance) = True
+    interesting (_, Key _) = True
+    interesting _ = False
+
+dijkstraCover :: Map -> Int -> [(Cell, Int, KeySet)]
+dijkstraCover (Map w h cs) start = runST $ do
+  results <- newSTRef []
+  seen <- MV.replicate (w * h) (Bit False)
+  queueRef <- newSTRef $ PSQ.singleton start 0 (S.empty)
+
+  let go = do
+        q <- readSTRef queueRef
+        case PSQ.minView q of
+          Nothing -> pure ()
+          Just (idx, cost, ks, q') -> do
+            writeSTRef queueRef q'
+            visitCell idx cost ks
+
+      isKey (Key _) = True
+      isKey _ = False
+
+      isVisitable idx = case cs ! idx of
+                          Wall -> False
+                          _ -> True
+
+
+      visitCell idx cost ks = do
+        MV.write seen idx (Bit True)
+
+        when (isKey (cs ! idx)) $ do
+            modifySTRef' results ((cs ! idx, cost, ks):)
+
+        let adjacent = filter isVisitable [idx - 1, idx + 1, idx - w, idx + w]
+
+        pure ()
+
+  go
+  readSTRef results
+
 
 main :: IO ()
 main = do
-  raw <- B.readFile "18.txt"
-  let parsed = parseMap raw
-  print $ optimizeMap parsed
+  m <- addPadding Wall <$> readMap2D fromChar "18.txt"
+
+  -- putStr $ showMap2D toChar (optimizeMap m)
+  print $ pointsOfInterest m
+  print $ dijkstraCover m (fst $ head $ pointsOfInterest m)
+
   pure ()
