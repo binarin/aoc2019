@@ -17,6 +17,7 @@ import Control.Loop
 import Control.Monad.ST
 import Control.Monad
 import Control.Monad.Extra
+import Control.Lens hiding (Empty)
 import Data.List
 import Data.Char
 import qualified Data.IntPSQ as PSQ
@@ -31,21 +32,21 @@ import Data.PSQueue (Binding((:->)))
 
 import Map2D
 
-data Cell = Empty | Wall | Entrance | Key Char | Door Char deriving (Eq, Show, Ord)
+data Cell = Empty | Wall | Entrance Int | Key Char | Door Char deriving (Eq, Show, Ord)
 
 type Map = Map2D Cell
 type KeySet = S.Set Char
 
 toChar Empty = " "
 toChar Wall = "█"
-toChar Entrance = "@"
+toChar (Entrance _) = "@"
 toChar (Key c) = [c]
 toChar (Door c) = [toUpper c]
 
 fromChar :: Char -> Cell
 fromChar '.' = Empty
 fromChar '#' = Wall
-fromChar '@' = Entrance
+fromChar '@' = Entrance 0
 fromChar c
   | c >= 'a' && c <= 'z' = Key c
   | c >= 'A' && c <= 'Z' = Door (toLower c)
@@ -87,7 +88,7 @@ optimizeMap (Map w h cells) =
 pointsOfInterest :: Map -> [(Int, Cell)]
 pointsOfInterest (Map _ _ m) = V.toList $ V.filter interesting $ V.indexed m
   where
-    interesting (_, Entrance) = True
+    interesting (_, Entrance _) = True
     interesting (_, Key _) = True
     interesting _ = False
 
@@ -143,7 +144,8 @@ type Coord = Int
 
 poiToTransIndex :: (Coord, Cell) -> TransIdx
 poiToTransIndex (_, Key c) = charToTransIndex c
-poiToTransIndex (_, Entrance) = 0
+poiToTransIndex (_, Entrance 0) = 0
+poiToTransIndex (_, Entrance eNo) = 26 + eNo
 poiToTransIndex poi = error $ "That's not a POI: " ++ show poi
 
 charToTransIndex :: Char -> Int
@@ -159,7 +161,8 @@ mkSearchKey :: Char -> KeySet -> Int
 mkSearchKey c ks = ksToInt ks * 32 + ord c - ord 'a' + 1
 
 cellToTrnIdx :: Cell -> Int
-cellToTrnIdx Entrance = 0
+cellToTrnIdx (Entrance 0) = 0
+cellToTrnIdx (Entrance n) = 26 + n
 cellToTrnIdx (Key c) = ord c - ord 'a' + 1
 cellToTrnIdx cl = error $ show cl ++ " is not a POI"
 
@@ -175,11 +178,16 @@ isKeyInKs _ _ = False
 
 allKeysCost :: Int -> Map -> Transitions -> Coord -> IO Cost
 allKeysCost reqCnt (Map _ _ m) trns idx = do
-  qRef <- newIORef $ PSQueue.singleton (Entrance, S.empty :: KeySet) 0
+  qRef <- newIORef $ PSQueue.singleton (Entrance 0, S.empty :: KeySet) 0
   cntRef :: IORef Int <- newIORef 0
 
   let go = do
         diag
+        c <- readIORef cntRef
+        when (c > 10) $ do
+          undefined
+        modifyIORef' cntRef succ
+
         q <- readIORef qRef
         case PSQueue.minView q of
           Nothing -> error $ "Search space exhausted " ++ show reqCnt
@@ -188,8 +196,11 @@ allKeysCost reqCnt (Map _ _ m) trns idx = do
             case S.size ks of
               sz | sz == reqCnt - 1 -> pure cost
               _ -> do
-                -- print $ ("At", cell, ks, cost)
+                print $ ("At", cell, ks, cost)
                 visitCell cell ks cost
+                if (ks == S.fromList "")
+                  then go
+                  else error "ho"
 
       visitCell cell ks cost = do
         modifyIORef' cntRef succ
@@ -198,7 +209,7 @@ allKeysCost reqCnt (Map _ _ m) trns idx = do
         -- print $ ("Cand", candidates, (trns ! (cellToTrnIdx cell)))
         forM_ candidates $ \(target, tCost, _) -> do
           modifyIORef' qRef (PSQueue.insertWith min (target, ks') (cost + tCost))
-        go
+
 
       isValidTransition has (target, _, req) =
         case isKeyInKs target has of
@@ -213,14 +224,98 @@ allKeysCost reqCnt (Map _ _ m) trns idx = do
 
   go
 
-main :: IO ()
-main = do
+main = part2
+
+enumerateEntrances :: Map -> Map
+enumerateEntrances (Map w h cs) = runST $ do
+  new <- V.thaw cs
+  numRef <- newSTRef 0
+  numLoop 0 (V.length cs - 1) $ \idx ->
+    case cs ! idx of
+      Entrance _ -> do
+        cur <- readSTRef numRef
+        modifySTRef' numRef succ
+        MV.write new idx (Entrance cur)
+      _ -> pure ()
+
+  Map w h <$> V.freeze new
+
+part2 :: IO ()
+part2 = do
+  m <- enumerateEntrances . addPadding Wall <$> readMap2D fromChar "18-2.txt"
+  let pois = pointsOfInterest m
+      keysNum = foldr (+) 0 [ 1 | (_, Key _) <- pois ]
+
+  transitions :: Transitions <- do
+        ts <- MV.new 30
+        forM_ pois $ \poi@(coord, _) -> do
+          let idx = poiToTransIndex poi
+          cover <- dijkstraCover m coord
+          MV.write ts idx cover
+        V.freeze ts
+
+  qRef <- newIORef $ PSQueue.singleton (Entrance 0, Entrance 1, Entrance 2, Entrance 3, S.empty :: KeySet) 0
+  cntRef <- newIORef 0
+
+  let go = do
+        modifyIORef cntRef succ
+        q <- readIORef qRef
+        case PSQueue.minView q of
+          Nothing -> error "Search queue exhausted"
+          Just (state@(_, _, _, _, ks) :-> cost, q') -> do
+            when (S.size ks == keysNum) $ do
+              error $ show cost
+            cnt <- readIORef cntRef
+            when (cnt `mod` 1000 == 0) $ do
+              print $ (cnt, cost, ks, S.size ks)
+            writeIORef qRef q'
+            -- putStrLn "\n--------------------"
+            -- print $ ("At", cost, state)
+            -- print "1"
+            moveRobot (_1) state cost
+            -- print "2"
+            moveRobot (_2) state cost
+            -- print "3"
+            moveRobot (_3) state cost
+            -- print "4"
+            moveRobot (_4) state cost
+            q <- readIORef qRef
+            -- putStrLn "===================="
+            -- sequence $ print <$> sort (PSQueue.toList q)
+            go
+
+      moveRobot :: ALens' (Cell, Cell, Cell, Cell, KeySet) Cell -> (Cell, Cell, Cell, Cell, KeySet) -> Int -> IO ()
+      moveRobot lens state@(_, _, _, _, ks) cost = do
+        let cell = state^#lens
+            ks' = addKeyToKs cell ks
+            trns = transitions ! (cellToTrnIdx cell)
+            candidates = filter (isValidTransition ks') trns
+        -- print $ ks'
+        -- print $ candidates
+        -- print $ trns
+        forM_ candidates $ \(target, tCost, _) -> do
+          let state' = state & lens #~ target
+                             & _5 #~ (addKeyToKs target ks')
+          modifyIORef' qRef (PSQueue.insertWith min state' (cost + tCost))
+        pure ()
+
+      isValidTransition has (target, _, req) =
+        case isKeyInKs target has of
+          True -> False
+          False -> 0 == S.size (S.difference req has)
+
+  go
+  -- print $ sort $ transitions ! 27
+  pure ()
+
+part1 :: IO ()
+part1 = do
   m <- addPadding Wall <$> readMap2D fromChar "18.txt"
 
   -- putStr $ showMap2D toChar (optimizeMap m)
 
   let pois = pointsOfInterest m
-      entrance = head [ x | (x, Entrance) <- pois ]
+      entrance = head [ x | (x, Entrance 0) <- pois ]
       keysNum = foldr (+) 0 [ 1 | (_, Key _) <- pois ]
 
   transitions :: Transitions <- do
