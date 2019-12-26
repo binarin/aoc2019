@@ -26,10 +26,12 @@ import qualified Data.Vector.Unboxed.Mutable as MUV
 import Data.Vector (Vector, (!))
 import qualified Data.Set as S
 import Data.IORef
+import qualified Data.PSQueue as PSQueue
+import Data.PSQueue (Binding((:->)))
 
 import Map2D
 
-data Cell = Empty | Wall | Entrance | Key Char | Door Char deriving (Eq, Show)
+data Cell = Empty | Wall | Entrance | Key Char | Door Char deriving (Eq, Show, Ord)
 
 type Map = Map2D Cell
 type KeySet = S.Set Char
@@ -89,18 +91,19 @@ pointsOfInterest (Map _ _ m) = V.toList $ V.filter interesting $ V.indexed m
     interesting (_, Key _) = True
     interesting _ = False
 
-dijkstraCover :: Map -> Int -> [(Char, Int, KeySet)]
-dijkstraCover (Map w h cs) start = runST $ do
-  results <- newSTRef []
+dijkstraCover :: Map -> Int -> IO [(Cell, Int, KeySet)]
+dijkstraCover (Map w h cs) start = do
+  results <- newIORef []
   seen <- MUV.replicate (w * h) (Bit False)
-  queueRef <- newSTRef $ PSQ.singleton start 0 (S.empty)
+  queueRef <- newIORef $ PSQ.singleton start 0 (S.empty)
 
   let go = do
-        q <- readSTRef queueRef
+        q <- readIORef queueRef
         case PSQ.minView q of
           Nothing -> pure ()
           Just (idx, cost, ks, q') -> do
-            writeSTRef queueRef q'
+            -- print ("Popped", idx, cs ! idx, cost, ks)
+            writeIORef queueRef q'
             visitCell idx cost ks
 
       isKey (Key _) = True
@@ -114,9 +117,9 @@ dijkstraCover (Map w h cs) start = runST $ do
       visitCell idx cost ks = do
         MUV.write seen idx (Bit True)
 
-        when (isKey (cs ! idx)) $ do
+        when ((isKey (cs ! idx)) && cost > 0) $ do
             let Key ch = cs ! idx
-            modifySTRef' results ((ch, cost, ks):)
+            modifyIORef' results ((Key ch, cost, ks):)
 
         let ks' = case cs ! idx of
                     Door c -> S.insert c ks
@@ -125,14 +128,14 @@ dijkstraCover (Map w h cs) start = runST $ do
 
         adjacent <- filterM isVisitable [idx - 1, idx + 1, idx - w, idx + w]
         forM_ adjacent $ \idx' -> do
-          modifySTRef' queueRef (PSQ.insert idx' cost' ks')
+          modifyIORef' queueRef (PSQ.insert idx' cost' ks')
 
         go
 
   go
-  readSTRef results
+  readIORef results
 
-type Transitions = Vector [(Char, Cost, KeySet)]
+type Transitions = Vector [(Cell, Cost, KeySet)]
 type TransIdx = Int
 
 type Cost = Int
@@ -155,73 +158,84 @@ ksToInt ks = go 0 ['a'..'z']
 mkSearchKey :: Char -> KeySet -> Int
 mkSearchKey c ks = ksToInt ks * 32 + ord c - ord 'a' + 1
 
-allKeysCost :: Map -> Transitions -> Coord -> IO Cost
-allKeysCost (Map _ _ m) trns idx = do
-  putStrLn "Allocating seen..."
-  seen <- MV.replicate (2^31) (Bit False)
-  putStrLn "Done"
+cellToTrnIdx :: Cell -> Int
+cellToTrnIdx Entrance = 0
+cellToTrnIdx (Key c) = ord c - ord 'a' + 1
+cellToTrnIdx cl = error $ show cl ++ " is not a POI"
 
-  seenCount <- newIORef 0
-  qRef <- newIORef $ PSQ.singleton (mkSearchKey '`' S.empty) 0 (S.empty)
+
+addKeyToKs :: Cell -> KeySet -> KeySet
+addKeyToKs (Key c) ks = S.insert c ks
+addKeyToKs _ ks = ks
+
+isKeyInKs :: Cell -> KeySet -> Bool
+isKeyInKs (Key c) ks = S.member c ks
+isKeyInKs _ _ = False
+
+
+allKeysCost :: Int -> Map -> Transitions -> Coord -> IO Cost
+allKeysCost reqCnt (Map _ _ m) trns idx = do
+  qRef <- newIORef $ PSQueue.singleton (Entrance, S.empty :: KeySet) 0
+  cntRef :: IORef Int <- newIORef 0
 
   let go = do
         diag
         q <- readIORef qRef
-        case PSQ.minView q of
-          Nothing -> pure ()
-          Just (searchKey, cost, ks, q') -> do
+        case PSQueue.minView q of
+          Nothing -> error $ "Search space exhausted " ++ show reqCnt
+          Just ((cell, ks) :-> cost, q') -> do
             writeIORef qRef q'
             case S.size ks of
-              x | x >= 25 -> print cost
-              _ -> visitNode searchKey cost ks
+              sz | sz == reqCnt - 1 -> pure cost
+              _ -> do
+                -- print $ ("At", cell, ks, cost)
+                visitCell cell ks cost
 
-      visitNode searchKey cost ks = do
-        MV.write seen searchKey (Bit True)
-        modifyIORef' seenCount succ
-        let keyNum = searchKey `mod` 32
-            keyChar = chr $ ord 'a' + keyNum - 1
-            ks' = if keyNum == 0 then ks else S.insert keyChar ks
-
-        candidates <- filterM (isValidTransition ks') (trns ! keyNum)
-        forM_ candidates $ \(cCh, cCost, cReqs) -> do
-          modifyIORef' qRef (PSQ.insert (mkSearchKey cCh ks') (cost + cCost) ks')
-
+      visitCell cell ks cost = do
+        modifyIORef' cntRef succ
+        let ks' = addKeyToKs cell ks
+            candidates = filter (isValidTransition ks') (trns ! (cellToTrnIdx cell))
+        -- print $ ("Cand", candidates, (trns ! (cellToTrnIdx cell)))
+        forM_ candidates $ \(target, tCost, _) -> do
+          modifyIORef' qRef (PSQueue.insertWith min (target, ks') (cost + tCost))
         go
 
-      isValidTransition has (c, _, req) = do
-        case S.size (S.difference req has) of
-          0 -> (not . unBit) <$> MV.read seen (mkSearchKey c has)
-          _ -> pure False
-
+      isValidTransition has (target, _, req) =
+        case isKeyInKs target has of
+          True -> False
+          False -> 0 == S.size (S.difference req has)
 
       diag = do
-        cnt <- readIORef seenCount
+        cnt <- readIORef cntRef
         when ((cnt `rem` 1000) == 0) $ do
           q <- readIORef qRef
-          let qSize = PSQ.size q
-              Just (_, _, ks) = PSQ.findMin q
-          putStrLn $ "Visited " ++ show cnt ++ ", queue " ++ show qSize ++ ", ks " ++ show ks
+          print (cnt, PSQueue.size q)
 
   go
-  pure 0
 
 main :: IO ()
 main = do
-  m <- addPadding Wall <$> readMap2D fromChar "18-sample3.txt"
+  m <- addPadding Wall <$> readMap2D fromChar "18.txt"
 
   -- putStr $ showMap2D toChar (optimizeMap m)
 
   let pois = pointsOfInterest m
       entrance = head [ x | (x, Entrance) <- pois ]
-      transitions :: Transitions = runST $ do
+      keysNum = foldr (+) 0 [ 1 | (_, Key _) <- pois ]
+
+  transitions :: Transitions <- do
         ts <- MV.new 27
         forM_ pois $ \poi@(coord, _) -> do
           let idx = poiToTransIndex poi
-          MV.write ts idx (dijkstraCover m coord)
+          cover <- dijkstraCover m coord
+          MV.write ts idx cover
         V.freeze ts
 
-  -- print $ sort $ transitions ! 0
+  -- sort <$> dijkstraCover m entrance >>= print
+  print $ sort $ transitions ! 0
   -- print $ searchKey 'z' (S.fromList "abcdefghijklmnopqrstuvwxyz")
-  allKeysCost m transitions entrance >>= print
+  print ("Poi", pois)
+  print ("KNum", keysNum)
+  allKeysCost keysNum m transitions entrance >>= print
 
   pure ()
