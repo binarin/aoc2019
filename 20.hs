@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 module Main where
 
+import Data.Char
 import Control.Concurrent (threadDelay)
 import Data.List (sort, findIndex)
 import qualified Data.Map as M
@@ -23,7 +24,8 @@ type Point = (Int, Int)
 
 type PortalLabel = (Char, Char)
 
-data Cell = Empty | Wall | Portal PortalLabel Point | Entrance | Exit deriving (Eq, Show, Ord)
+data PortalType = Inner | Outer deriving (Eq, Show, Ord)
+data Cell = Empty | Wall | Portal PortalLabel Point PortalType | Entrance | Exit deriving (Eq, Show, Ord)
 
 type Width = Int
 type Height = Int
@@ -88,8 +90,10 @@ parseMap w h rawIn = runST $ do
           Nothing -> do
             writeSTRef portalRef (M.insert label (x, y) portals)
           Just (ox, oy) -> do
-            MV.write final (ox + oy * w) (Portal label (x, y))
-            MV.write final (x + y * w) (Portal label (ox, oy))
+            let thisIsOuter = ox <= 3 || ox >= w - 4 || oy <= 3 || oy >= h - 4
+
+            MV.write final (ox + oy * w) (Portal label (x, y) (if thisIsOuter then Outer else Inner))
+            MV.write final (x + y * w) (Portal label (ox, oy) (if not thisIsOuter then Outer else Inner))
         pure ()
 
       detectPortal x y labelPart = do
@@ -130,7 +134,8 @@ printMap :: Width -> Height -> Vector Cell -> IO ()
 printMap w h v = do
   let render Wall = "██"
       render Empty = "  "
-      render (Portal (a,b) _) = (a:b:[])
+      render (Portal (a,b) _ Inner) = (toLower a:toLower b:[])
+      render (Portal (a,b) _ Outer) = (a:b:[])
       render Entrance = "AA"
       render Exit = "ZZ"
 
@@ -138,6 +143,11 @@ printMap w h v = do
     numLoop 0 (w - 1) $ \x -> do
       putStr $ render (v ! (x + y * w))
     putStrLn ""
+
+part2 :: IO ()
+part2 = do
+  pure ()
+
 
 shortest :: Width -> Height -> Vector Cell -> IO Int
 shortest w h m = do
@@ -191,17 +201,20 @@ shortest w h m = do
                 Empty -> visitNormal idx cost >> go
                 Entrance -> visitNormal idx cost >> go
                 Exit -> pure cost
-                Portal _ (x, y) -> do
+                Portal _ (x, y) _ -> do
                   visitNormal idx cost
                   visitNormal (x + y * w) (cost + 1)
                   go
   go
 
-main :: IO ()
-main = do
+part1 :: IO ()
+part1 = do
   (w, h, raw) <- readMap "20.txt"
   let parsed = parseMap w h raw
   -- printMap w h parsed
   -- print $ sort $ [ x | x@(Portal _ _) <- V.toList parsed ]
   shortest w h parsed >>= print
   pure ()
+
+main :: IO ()
+main = part2
