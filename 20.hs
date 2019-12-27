@@ -1,6 +1,9 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
+import Data.Maybe
+import Control.Lens hiding (Empty, Level)
 import Data.Char
 import Control.Concurrent (threadDelay)
 import Data.List (sort, findIndex)
@@ -11,10 +14,13 @@ import Data.Vector (Vector, (!))
 import qualified Data.Vector as V
 import Control.Loop
 import Control.Monad.ST
-import Control.Monad (filterM)
+import Control.Monad
 import Data.STRef
 import Data.IORef
 import qualified Data.IntPSQ as PSQ
+import qualified Data.HashMap.Strict as HM
+
+import Map2D hiding (Cost)
 
 data RawCell = RawWall | RawEmpty | RawPortalPart Char | RawPortal Char Char
   deriving (Eq, Show)
@@ -144,10 +150,92 @@ printMap w h v = do
       putStr $ render (v ! (x + y * w))
     putStrLn ""
 
+isVisitable :: Cell -> Bool
+isVisitable Wall = False
+isVisitable _ = True
+
+isInteresting :: Cell -> Bool
+isInteresting Wall = False
+isInteresting Empty = False
+isInteresting _ = True
+
+
 part2 :: IO ()
 part2 = do
+  Map w h csRaw <- addPadding RawWall <$> readMap2D charToRawCell "20.txt"
+  let m@(Map _ _ cs) = Map w h (parseMap w h csRaw)
+      poi = findCells (\c -> c /= Empty && c /= Wall ) m
+      entrance = head [ i | (Entrance, i) <- poi ]
+      exit = head [ i | (Exit, i) <- poi ]
+      transitions = HM.fromList $ [ (idx, dijkstraCover isInteresting isVisitable idx m) | (_, idx) <- poi ]
+      levStride = w * h
+
+  qRef <- newIORef $ PSQ.singleton entrance 0 0
+  seenRef <- newIORef $ M.empty
+  cntRef <- newIORef 0
+
+  let go = do
+        q <- readIORef qRef
+        modifyIORef' cntRef succ
+        cnt <- readIORef cntRef
+
+        -- when (cnt > 10) $ error "stop" -- XXX
+
+        case PSQ.minView q of
+          Nothing -> error "Nothing found"
+          Just (idxLev, prio, cost, q')
+            | idxLev == exit -> do
+                print ("COST", cost)
+            | otherwise -> do
+                writeIORef qRef q'
+                let (level, idx) = idxLev `divMod` (w * h)
+                visitCell level idx cost
+                go
+
+      visitCell level idx cost = do
+        modifyIORef' seenRef (M.insert (level * levStride + idx) True)
+        seen <- readIORef seenRef
+
+        print ("At", level, cs ! idx, cost, M.size seen)
+
+        let candidates :: [(MapIndex, Cost)] = filter (\(i, _) -> works level (cs ! i)) $ transitions HM.! idx
+
+            works 0 Entrance = True
+            works _ Entrance = False
+            works 0 Exit = True
+            works _ Exit = False
+            works 0 (Portal _ _ Outer) = False
+            works _ _ = True
+
+            targets = (\(i, thisC) -> (level * levStride + i, cost + thisC)) <$> candidates
+
+            otherSide = case (level, cs ! idx) of
+              (_, Entrance) -> []
+              (_, Exit) -> []
+              (0, Portal _ _ Outer) -> []
+              (_, Portal _ (x, y) Inner) -> [ ((level + 1) * levStride + y * w + x, cost + 1) ]
+              (_, Portal _ (x, y) Outer) -> [ ((level - 1) * levStride + y * w + x, cost + 1) ]
+
+            validTargets = filter (\(i, _) -> not (M.member i seen)) (otherSide ++ targets)
+
+        print ("VT", validTargets)
+        forM_ validTargets $ \(ti, tc) -> do
+
+          let maybeAdd :: Maybe (Int, Cost) -> ((), Maybe (Int, Cost))
+              maybeAdd Nothing = ((), Just (ti, tc))
+              maybeAdd (Just (_, oldCost)) = ((), Just (ti, min oldCost tc))
+          modifyIORef' qRef (snd . PSQ.alter maybeAdd ti)
+
+          pure ()
+
+
+  go
   pure ()
 
+type Cost = Int
+type Level = Int
+
+type SearchState = (Level, Cell, Cost)
 
 shortest :: Width -> Height -> Vector Cell -> IO Int
 shortest w h m = do
